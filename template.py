@@ -15,7 +15,14 @@ def _():
     from scipy.stats import mannwhitneyu
     import tensorflow as tf
     from sklearn.model_selection import train_test_split
-    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score
+    from sklearn.metrics import (
+        accuracy_score,
+        balanced_accuracy_score,
+        confusion_matrix,
+        f1_score,
+        roc_curve,
+        roc_auc_score,
+    )
     from tensorflow.keras import layers, models
     from tensorflow.keras.applications import MobileNetV2
     from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
@@ -29,6 +36,7 @@ def _():
         TSNE,
         accuracy_score,
         balanced_accuracy_score,
+        confusion_matrix,
         f1_score,
         layers,
         mannwhitneyu,
@@ -40,6 +48,7 @@ def _():
         pd,
         plt,
         preprocess_input,
+        roc_curve,
         roc_auc_score,
         tf,
         train_test_split,
@@ -503,6 +512,7 @@ def _(mo):
 def _(
     accuracy_score,
     balanced_accuracy_score,
+    confusion_matrix,
     f1_score,
     history_step2,
     label_encoder_step2,
@@ -546,7 +556,6 @@ def _(
         ],
         columns=["Metric", "Value"],
     )
-    metrics_table_results["Value"] = metrics_table_results["Value"].map(lambda x: f"{x:.4f}")
 
     def entropy_rows(p):
         eps = 1e-12
@@ -602,7 +611,6 @@ def _(
         ],
         columns=["Statistic", "Value"],
     )
-    novelty_table_results["Value"] = novelty_table_results["Value"].map(lambda x: f"{x:.6f}")
 
     centroid_probs = known_results.groupby("true_class")[prob_cols_results].mean()
 
@@ -676,25 +684,82 @@ def _(
         [["Expected Calibration Error (ECE, known classes)", ece]],
         columns=["Metric", "Value"],
     )
-    calibration_summary["Value"] = calibration_summary["Value"].map(lambda x: f"{x:.6f}")
+
+    top_confusions = (
+        pd.crosstab(known_eval["true_class"], known_eval["pred_class"])
+        .stack()
+        .reset_index(name="count")
+        .query("true_class != pred_class and count > 0")
+        .sort_values("count", ascending=False)
+        .head(12)
+        .rename(
+            columns={
+                "true_class": "True class",
+                "pred_class": "Predicted as",
+                "count": "Count",
+            }
+        )
+    )
+
+    def styled_table_html(df, value_decimals=4):
+        styled_df = df.copy()
+        numeric_cols = styled_df.select_dtypes(include=["number"]).columns
+        for col in numeric_cols:
+            styled_df[col] = styled_df[col].map(
+                lambda x: f"{x:.{value_decimals}f}" if isinstance(x, (int, float, np.floating)) else x
+            )
+        return (
+            styled_df.style.hide(axis="index")
+            .set_table_styles(
+                [
+                    {"selector": "th", "props": [("background-color", "#1f2937"), ("color", "white"), ("padding", "8px"), ("text-align", "left")]},
+                    {"selector": "td", "props": [("padding", "8px"), ("border-bottom", "1px solid #e5e7eb")]},
+                    {"selector": "table", "props": [("border-collapse", "collapse"), ("width", "100%"), ("font-size", "0.95rem")]},
+                ]
+            )
+            .to_html()
+        )
+
+    metrics_table_html = styled_table_html(metrics_table_results, value_decimals=4)
+    novelty_table_html = styled_table_html(novelty_table_results, value_decimals=6)
+    calibration_table_html = styled_table_html(calibration_summary, value_decimals=6)
+    neighbors_table_html = styled_table_html(novelty_neighbors_table, value_decimals=4)
+    confusions_table_html = styled_table_html(top_confusions, value_decimals=0)
+
+    cm_labels = pd.Index(sorted(known_eval["true_class"].unique()))
+    confusion_mat = confusion_matrix(
+        known_eval["true_class"],
+        known_eval["pred_class"],
+        labels=cm_labels.tolist(),
+        normalize="true",
+    )
     return (
+        auc_novelty_entropy,
+        auc_novelty_margin,
         calibration_df,
-        calibration_summary,
         class_diagnostics,
+        cm_labels,
+        confusion_mat,
+        confusions_table_html,
+        known_eval,
+        metrics_table_html,
         metrics_table_results,
-        novelty_neighbors_table,
-        novelty_table_results,
+        neighbors_table_html,
+        novelty_table_html,
+        top_confusions,
+        calibration_table_html,
         signatures_df_results,
     )
 
 
 @app.cell
 def _(
-    calibration_summary,
-    metrics_table_results,
+    calibration_table_html,
+    confusions_table_html,
+    metrics_table_html,
     mo,
-    novelty_neighbors_table,
-    novelty_table_results,
+    neighbors_table_html,
+    novelty_table_html,
 ):
     mo.md(f"""
     ### Model performance and validity checks
@@ -705,16 +770,19 @@ def _(
     3) similarity-based descriptive outputs for unseen birds.
 
     **Table 1. Predictive performance on known species**
-    {metrics_table_results.to_markdown(index=False)}
+    {metrics_table_html}
 
     **Table 2. Novelty confidence and statistical significance**
-    {novelty_table_results.to_markdown(index=False)}
+    {novelty_table_html}
 
     **Table 3. Calibration diagnostic on known classes**
-    {calibration_summary.to_markdown(index=False)}
+    {calibration_table_html}
 
     **Table 4. Ranked cosine-similarity neighborhoods for withheld-species images**
-    {novelty_neighbors_table.to_markdown(index=False)}
+    {neighbors_table_html}
+
+    **Table 5. Most frequent class confusions (known classes only)**
+    {confusions_table_html}
 
     How these results go beyond a basic CV assignment:
     - **Predictive power with uncertainty framing:** top-1/top-3, macro-F1, and balanced accuracy are reported together so performance is not reduced to a single vanity metric.
@@ -726,7 +794,37 @@ def _(
 
 
 @app.cell
-def _(calibration_df, class_diagnostics, plt, signatures_df_results):
+def _(auc_novelty_entropy, auc_novelty_margin, mo):
+    stronger_score = (
+        "entropy"
+        if auc_novelty_entropy >= auc_novelty_margin
+        else "negative top-1/top-2 margin"
+    )
+    mo.md(
+        f"""
+    ### ROC / AUC interpretation for novelty detection
+
+    - **AUC (entropy score):** `{auc_novelty_entropy:.4f}`
+    - **AUC (negative top-1/top-2 margin score):** `{auc_novelty_margin:.4f}`
+
+    Interpretation: AUC measures how well each uncertainty score ranks novel images above known images across all thresholds (0.5 = random, 1.0 = perfect separation).  
+    In this run, **{stronger_score}** is the stronger novelty signal because it has the larger AUC.
+    """
+    )
+    return
+
+
+@app.cell
+def _(
+    calibration_df,
+    class_diagnostics,
+    cm_labels,
+    confusion_mat,
+    known_eval,
+    plt,
+    roc_curve,
+    signatures_df_results,
+):
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
 
     axes[0].plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
@@ -811,6 +909,84 @@ def _(calibration_df, class_diagnostics, plt, signatures_df_results):
     plt.ylabel("One-vs-rest F1 score")
     plt.ylim(0, 1.02)
     plt.show()
+
+    # Additional visualization 1: normalized confusion matrix (top classes by support)
+    support_by_class = known_eval["true_class"].value_counts()
+    top_classes = support_by_class.head(15).index.tolist()
+    top_idx = [cm_labels.get_loc(c) for c in top_classes]
+    cm_top = confusion_mat[np.ix_(top_idx, top_idx)]
+
+    plt.figure(figsize=(9, 8))
+    heat = plt.imshow(cm_top, cmap="magma", vmin=0, vmax=1)
+    plt.colorbar(heat, fraction=0.045, pad=0.04, label="Row-normalized recall")
+    plt.title("Additional Viz 1: Confusion Matrix (Top 15 Known Classes)")
+    plt.xticks(range(len(top_classes)), top_classes, rotation=90, fontsize=7)
+    plt.yticks(range(len(top_classes)), top_classes, fontsize=7)
+    plt.xlabel("Predicted class")
+    plt.ylabel("True class")
+    plt.tight_layout()
+    plt.show()
+
+    # Additional visualization 2: entropy distribution by correctness
+    correct_entropy = known_eval.loc[known_eval["correct"] == 1, "entropy"].to_numpy()
+    wrong_entropy = known_eval.loc[known_eval["correct"] == 0, "entropy"].to_numpy()
+
+    plt.figure(figsize=(8, 5))
+    box = plt.boxplot(
+        [correct_entropy, wrong_entropy],
+        labels=["Correct predictions", "Incorrect predictions"],
+        patch_artist=True,
+        medianprops={"color": "black", "linewidth": 1.3},
+    )
+    box["boxes"][0].set(facecolor="#34d399", alpha=0.65)
+    box["boxes"][1].set(facecolor="#f87171", alpha=0.65)
+    plt.title("Additional Viz 2: Entropy by Prediction Correctness")
+    plt.ylabel("Prediction entropy")
+    plt.grid(axis="y", alpha=0.25)
+    plt.tight_layout()
+    plt.show()
+
+    # Additional visualization 3: calibration gap by confidence bin
+    calibration_plot = calibration_df.dropna().copy()
+    calibration_plot["bin_label"] = calibration_plot["conf_bin"].astype(str)
+    calibration_plot["signed_gap"] = (
+        calibration_plot["mean_conf"] - calibration_plot["accuracy"]
+    )
+    colors = ["#ef4444" if g > 0 else "#3b82f6" for g in calibration_plot["signed_gap"]]
+
+    plt.figure(figsize=(10, 5))
+    plt.bar(
+        calibration_plot["bin_label"],
+        calibration_plot["signed_gap"],
+        color=colors,
+        alpha=0.8,
+    )
+    plt.axhline(0, color="black", linewidth=1)
+    plt.title("Additional Viz 3: Confidence-Accuracy Gap by Bin")
+    plt.xlabel("Confidence bin")
+    plt.ylabel("Mean confidence - empirical accuracy")
+    plt.xticks(rotation=35, ha="right")
+    plt.tight_layout()
+    plt.show()
+
+    # Additional visualization 4: ROC curve for novelty detection
+    y_true_novel = signatures_df_results["is_novel"].astype(int).to_numpy()
+    score_entropy = signatures_df_results["entropy"].to_numpy()
+    score_margin = (-signatures_df_results["margin_top1_top2"]).to_numpy()
+    fpr_entropy, tpr_entropy, _ = roc_curve(y_true_novel, score_entropy)
+    fpr_margin, tpr_margin, _ = roc_curve(y_true_novel, score_margin)
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr_entropy, tpr_entropy, linewidth=2, label="Entropy novelty score")
+    plt.plot(fpr_margin, tpr_margin, linewidth=2, label="Negative margin novelty score")
+    plt.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1, label="Random baseline")
+    plt.title("Additional Viz 4: ROC Curves for Novelty Detection")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.legend(loc="lower right")
+    plt.grid(alpha=0.2)
+    plt.tight_layout()
+    plt.show()
     return
 
 
@@ -823,11 +999,15 @@ def _(mo):
 
     The strongest contribution is not the top-1 score; it is the ranked neighborhood output. For unseen images, we can say “this bird is closest to these three known classes, in this order, with these similarity values.” That is the kind of interpretation we practiced all semester: turning model behavior into evidence that can support inquiry, not just prediction.
 
-    The interpretation is anchored in four non-basic diagnostic plots:
+    The interpretation is anchored in multiple non-basic diagnostic plots:
     - **Reliability curve:** confidence vs. empirical accuracy shows how calibrated (or overconfident) the known-class predictions are, with bin counts to prevent over-reading sparse bins.
     - **Top-1 vs top-2 margin distribution:** novel images compress toward smaller margins, showing ambiguity in rank structure even before the model fully “admits” uncertainty.
     - **Confidence–entropy geometry:** novel points concentrate in the low-confidence/high-entropy region, giving a geometric view of uncertainty rather than a single threshold.
     - **Class-level support vs F1 (entropy-colored bubbles):** this reveals where the model struggles despite comparable sample sizes, which is stronger evidence of fine-grained confusion than aggregate accuracy alone.
+    - **Normalized confusion-matrix heatmap:** highlights which known classes are most frequently confused with each other.
+    - **Entropy boxplot (correct vs incorrect):** demonstrates that errors are associated with systematically higher uncertainty.
+    - **Calibration-gap bar chart by confidence bin:** isolates exactly where the model is over- or under-confident.
+    - **ROC curves for novelty detection:** compare threshold-free separability of known vs novel examples using entropy and margin-based uncertainty scores.
 
     Major caveats:
     - **Single withheld-species setup:** this is strong evidence for one novelty scenario, not yet a universal claim across all species families.
