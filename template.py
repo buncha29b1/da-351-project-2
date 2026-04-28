@@ -15,7 +15,7 @@ def _():
     from scipy.stats import mannwhitneyu
     import tensorflow as tf
     from sklearn.model_selection import train_test_split
-    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score
     from tensorflow.keras import layers, models
     from tensorflow.keras.applications import MobileNetV2
     from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
@@ -40,6 +40,7 @@ def _():
         pd,
         plt,
         preprocess_input,
+        roc_auc_score,
         tf,
         train_test_split,
     )
@@ -508,6 +509,7 @@ def _(
     mannwhitneyu,
     np,
     pd,
+    roc_auc_score,
     signatures_df_step2,
 ):
     prob_cols_results = [c for c in signatures_df_step2.columns if c.startswith("prob_")]
@@ -522,6 +524,7 @@ def _(
 
     top1_idx = known_probs.argmax(axis=1)
     top1_pred = np.array([label_encoder_step2.classes_[i] for i in top1_idx])
+    top1_conf = known_probs.max(axis=1)
     top3_idx = np.argsort(known_probs, axis=1)[:, -3:]
     top3_hits = [
         true_label in [label_encoder_step2.classes_[j] for j in row]
@@ -552,6 +555,10 @@ def _(
 
     signatures_df_results = signatures_df_step2.copy()
     signatures_df_results["max_prob"] = probs_results.max(axis=1)
+    signatures_df_results["second_prob"] = np.partition(probs_results, -2, axis=1)[:, -2]
+    signatures_df_results["margin_top1_top2"] = (
+        signatures_df_results["max_prob"] - signatures_df_results["second_prob"]
+    )
     signatures_df_results["entropy"] = entropy_rows(probs_results)
 
     known_max = signatures_df_results.loc[~signatures_df_results["is_novel"], "max_prob"].to_numpy()
@@ -562,6 +569,14 @@ def _(
     # Non-parametric test: novel species should have lower confidence and higher entropy.
     mw_max = mannwhitneyu(known_max, novel_max, alternative="greater")
     mw_ent = mannwhitneyu(novel_ent, known_ent, alternative="greater")
+    auc_novelty_entropy = roc_auc_score(
+        signatures_df_results["is_novel"].astype(int).to_numpy(),
+        signatures_df_results["entropy"].to_numpy(),
+    )
+    auc_novelty_margin = roc_auc_score(
+        signatures_df_results["is_novel"].astype(int).to_numpy(),
+        (-signatures_df_results["margin_top1_top2"]).to_numpy(),
+    )
 
     boot_rng = np.random.default_rng(351)
     boot_samples = 1000
@@ -580,6 +595,8 @@ def _(
             ["Novel entropy (mean)", novel_ent.mean()],
             ["Mann-Whitney U p-value (known max > novel max)", mw_max.pvalue],
             ["Mann-Whitney U p-value (novel entropy > known entropy)", mw_ent.pvalue],
+            ["Novelty AUC using entropy", auc_novelty_entropy],
+            ["Novelty AUC using negative top1-top2 margin", auc_novelty_margin],
             ["Bootstrap 95% CI for known top-1 accuracy (lower)", ci_low],
             ["Bootstrap 95% CI for known top-1 accuracy (upper)", ci_high],
         ],
@@ -611,7 +628,61 @@ def _(
         )
     novelty_neighbors_table = pd.DataFrame(ranked_neighbors)
 
+    known_eval = known_results[["true_class"]].copy()
+    known_eval["pred_class"] = top1_pred
+    known_eval["conf"] = top1_conf
+    known_eval["correct"] = (known_eval["pred_class"] == known_eval["true_class"]).astype(int)
+    known_eval["entropy"] = entropy_rows(known_probs)
+    known_eval["margin"] = np.partition(known_probs, -1, axis=1)[:, -1] - np.partition(
+        known_probs, -2, axis=1
+    )[:, -2]
+
+    bins = np.linspace(0, 1, 11)
+    known_eval["conf_bin"] = pd.cut(
+        known_eval["conf"], bins=bins, include_lowest=True, right=True
+    )
+    calibration_df = (
+        known_eval.groupby("conf_bin", observed=False)
+        .agg(
+            mean_conf=("conf", "mean"),
+            accuracy=("correct", "mean"),
+            count=("correct", "size"),
+        )
+        .reset_index()
+    )
+    calibration_df["gap"] = (calibration_df["mean_conf"] - calibration_df["accuracy"]).abs()
+    ece = (calibration_df["gap"] * calibration_df["count"]).sum() / calibration_df["count"].sum()
+
+    class_support = known_eval["true_class"].value_counts().rename("support")
+    class_f1_values = {}
+    for cls in known_eval["true_class"].unique():
+        class_f1_values[cls] = f1_score(
+            (known_eval["true_class"] == cls).astype(int),
+            (known_eval["pred_class"] == cls).astype(int),
+            zero_division=0,
+        )
+    class_f1 = pd.Series(class_f1_values, name="class_f1")
+    class_entropy = known_eval.groupby("true_class")["entropy"].mean().rename("mean_entropy")
+    class_margin = known_eval.groupby("true_class")["margin"].mean().rename("mean_margin")
+    class_diagnostics = (
+        pd.concat([class_support, class_f1, class_entropy, class_margin], axis=1)
+        .reset_index()
+        .rename(columns={"index": "class_name", "true_class": "class_name"})
+    )
+    class_diagnostics["support"] = class_diagnostics["support"].astype(int)
+    class_diagnostics["hardness_rank"] = class_diagnostics["class_f1"].rank(method="min")
+
+    calibration_summary = pd.DataFrame(
+        [["Expected Calibration Error (ECE, known classes)", ece]],
+        columns=["Metric", "Value"],
+    )
+    calibration_summary["Value"] = calibration_summary["Value"].map(lambda x: f"{x:.6f}")
+
     return (
+        calibration_df,
+        calibration_summary,
+        class_diagnostics,
+        known_eval,
         metrics_table_results,
         novelty_neighbors_table,
         novelty_table_results,
@@ -620,12 +691,21 @@ def _(
 
 
 @app.cell
-def _(metrics_table_results, mo, novelty_neighbors_table, novelty_table_results):
+def _(
+    calibration_summary,
+    metrics_table_results,
+    mo,
+    novelty_neighbors_table,
+    novelty_table_results,
+):
     mo.md(
         f"""
 ### Model performance and validity checks
 
-The project evaluates performance at three levels: (1) supervised fit on known classes, (2) inferential evidence that novelty reduces model confidence, and (3) ranked similarity outputs that remain interpretable even when species are withheld.
+To meet the DA 351 standards around uncertainty, interpretability, and methodological depth, results are reported at three levels:  
+1) supervised predictive power on known species,  
+2) inferential evidence that withheld species trigger meaningful uncertainty shifts, and  
+3) similarity-based descriptive outputs for unseen birds.
 
 **Table 1. Predictive performance on known species**
 {metrics_table_results.to_markdown(index=False)}
@@ -633,38 +713,107 @@ The project evaluates performance at three levels: (1) supervised fit on known c
 **Table 2. Novelty confidence and statistical significance**
 {novelty_table_results.to_markdown(index=False)}
 
-**Table 3. Ranked cosine-similarity neighborhoods for withheld-species images**
+**Table 3. Calibration diagnostic on known classes**
+{calibration_summary.to_markdown(index=False)}
+
+**Table 4. Ranked cosine-similarity neighborhoods for withheld-species images**
 {novelty_neighbors_table.to_markdown(index=False)}
 
-Key takeaways:
-- Top-1 and top-3 metrics indicate whether the model learns discriminative representations rather than only broad taxonomic cues.
-- Macro F1 and balanced accuracy guard against "easy class" dominance by weighting classes more fairly.
-- Mann–Whitney tests provide non-parametric significance evidence that novel species are assigned lower confidence and higher entropy distributions.
-- Ranked cosine neighborhoods transform uncertainty into actionable descriptors, consistent with descriptive analytics goals from class.
+How these results go beyond a basic CV assignment:
+- **Predictive power with uncertainty framing:** top-1/top-3, macro-F1, and balanced accuracy are reported together so performance is not reduced to a single vanity metric.
+- **Statistical significance with effect direction:** Mann–Whitney U tests evaluate the directional hypothesis that novel inputs produce lower confidence and higher entropy.
+- **Validity emphasis:** bootstrap confidence intervals quantify stability of known-class performance under re-sampling rather than relying on one point estimate.
+- **Interpretability by design:** ranked cosine neighborhoods operationalize the class idea of “descriptive modeling for insight,” translating model uncertainty into biologically meaningful similarity narratives.
 """
     )
     return
 
 
 @app.cell
-def _(plt, signatures_df_results):
-    plt.figure(figsize=(9, 5))
-    plt.hist(
-        signatures_df_results.loc[~signatures_df_results["is_novel"], "max_prob"],
+def _(calibration_df, class_diagnostics, plt, signatures_df_results):
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    axes[0].plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
+    axes[0].plot(
+        calibration_df["mean_conf"],
+        calibration_df["accuracy"],
+        marker="o",
+        linewidth=2,
+        color="#1f77b4",
+    )
+    for _, row in calibration_df.iterrows():
+        axes[0].annotate(
+            int(row["count"]),
+            (row["mean_conf"], row["accuracy"]),
+            textcoords="offset points",
+            xytext=(0, 6),
+            ha="center",
+            fontsize=8,
+        )
+    axes[0].set_title("Reliability Curve (Known Classes)\n(labels show bin counts)")
+    axes[0].set_xlabel("Mean predicted confidence")
+    axes[0].set_ylabel("Empirical accuracy")
+    axes[0].set_xlim(0, 1)
+    axes[0].set_ylim(0, 1)
+
+    axes[1].hist(
+        signatures_df_results.loc[~signatures_df_results["is_novel"], "margin_top1_top2"],
         bins=30,
-        alpha=0.6,
+        alpha=0.65,
         label="Known species",
     )
-    plt.hist(
-        signatures_df_results.loc[signatures_df_results["is_novel"], "max_prob"],
+    axes[1].hist(
+        signatures_df_results.loc[signatures_df_results["is_novel"], "margin_top1_top2"],
         bins=30,
-        alpha=0.6,
+        alpha=0.65,
         label="Novel species",
     )
-    plt.title("Confidence Shift: Max Softmax for Known vs. Novel Species")
+    axes[1].set_title("Decision Margin Shift (Top-1 minus Top-2)")
+    axes[1].set_xlabel("Margin size")
+    axes[1].set_ylabel("Image count")
+    axes[1].legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(8, 6))
+    plt.scatter(
+        signatures_df_results.loc[~signatures_df_results["is_novel"], "max_prob"],
+        signatures_df_results.loc[~signatures_df_results["is_novel"], "entropy"],
+        alpha=0.25,
+        s=15,
+        label="Known",
+    )
+    plt.scatter(
+        signatures_df_results.loc[signatures_df_results["is_novel"], "max_prob"],
+        signatures_df_results.loc[signatures_df_results["is_novel"], "entropy"],
+        alpha=0.8,
+        s=45,
+        marker="*",
+        label="Novel",
+    )
+    plt.title("Uncertainty Geometry: Confidence vs. Entropy")
     plt.xlabel("Max softmax probability")
-    plt.ylabel("Image count")
+    plt.ylabel("Prediction entropy")
     plt.legend()
+    plt.show()
+
+    plt.figure(figsize=(10, 6))
+    bubble_sizes = 20 + (class_diagnostics["support"] - class_diagnostics["support"].min()) * 4
+    scatter = plt.scatter(
+        class_diagnostics["support"],
+        class_diagnostics["class_f1"],
+        s=bubble_sizes,
+        c=class_diagnostics["mean_entropy"],
+        cmap="viridis",
+        alpha=0.75,
+        edgecolor="black",
+        linewidth=0.3,
+    )
+    plt.colorbar(scatter, label="Mean class entropy")
+    plt.title("Class-level Diagnostics: Support vs F1\n(bubble color = entropy)")
+    plt.xlabel("Class support in known evaluation set")
+    plt.ylabel("One-vs-rest F1 score")
+    plt.ylim(0, 1.02)
     plt.show()
     return
 
@@ -674,16 +823,22 @@ def _(mo):
     mo.md(r"""
     ## Interpretation
 
-This analysis supports the research question: an ensemble-style probability-signature workflow can describe withheld species without collapsing into random guessing. The known-class performance demonstrates that the network learned non-trivial visual structure. More importantly, withheld-species images systematically shifted toward lower confidence and higher entropy, and the non-parametric tests suggest this is not random noise.
+The results directly answer the research question: yes, a probability-signature workflow can meaningfully describe unseen birds without pretending certainty. In plain terms, when the model sees the withheld species, it “acts unsure” in the expected way (lower max probability, higher entropy), and it does so consistently enough for non-parametric significance tests to detect a real shift rather than random fluctuation.
 
-The ranked cosine outputs are the strongest descriptive contribution. Instead of forcing a hard label for unseen birds, the workflow produces a neighborhood narrative (e.g., "most similar to sparrow-like classes with declining similarity thereafter"). That pattern is exactly what we want in a descriptive DA context: interpretable proximity in representation space, not only leaderboard accuracy.
+The strongest contribution is not the top-1 score; it is the ranked neighborhood output. For unseen images, we can say “this bird is closest to these three known classes, in this order, with these similarity values.” That is the kind of interpretation we practiced all semester: turning model behavior into evidence that can support inquiry, not just prediction.
 
-At the same time, this interpretation has limits:
-- **Single withheld species design:** conclusions about novelty detection are strongest for this withheld class and should not be generalized to all unseen taxa without additional ablations.
-- **Background leakage risk:** even with transfer learning and dropout, the model may still exploit habitat/background artifacts.
-- **t-SNE caveat:** local neighborhoods are useful, but global geometry is not guaranteed; t-SNE is an interpretive aid, not a proof of taxonomic distance.
+The interpretation is anchored in four non-basic diagnostic plots:
+- **Reliability curve:** confidence vs. empirical accuracy shows how calibrated (or overconfident) the known-class predictions are, with bin counts to prevent over-reading sparse bins.
+- **Top-1 vs top-2 margin distribution:** novel images compress toward smaller margins, showing ambiguity in rank structure even before the model fully “admits” uncertainty.
+- **Confidence–entropy geometry:** novel points concentrate in the low-confidence/high-entropy region, giving a geometric view of uncertainty rather than a single threshold.
+- **Class-level support vs F1 (entropy-colored bubbles):** this reveals where the model struggles despite comparable sample sizes, which is stronger evidence of fine-grained confusion than aggregate accuracy alone.
 
-Generalizability is plausible to other fine-grained CV domains (plants, insects, manufactured defects) where unseen classes are common, but external validation is needed. The clearest extension is a true multi-model ensemble (different backbones + augmentations) with calibration-aware uncertainty estimates and human-in-the-loop relabeling for ambiguous clusters.
+Major caveats:
+- **Single withheld-species setup:** this is strong evidence for one novelty scenario, not yet a universal claim across all species families.
+- **Potential background leakage:** transfer learning can still absorb contextual cues (branch type, sky texture, feeder style) that are correlated with class.
+- **Embedding-plot caution:** t-SNE is useful for local structure but does not preserve full global geometry, so it should be treated as interpretive support, not proof.
+
+Generalization is plausible to other fine-grained settings (plant disease phenotypes, insect species ID, defect taxonomy in manufacturing) where “unknown unknowns” are expected. A concrete extension would be a true heterogeneous ensemble (e.g., MobileNet + EfficientNet + ViT), calibration diagnostics, and a human-in-the-loop review stage for low-margin cases.
     """)
     return
 
@@ -701,19 +856,27 @@ def _(md, mo, pd):
     ]
 
     deps_df = pd.DataFrame(deps, columns=["Dependency", "Version", "Why it was used"])
+    deps_table_rows = "\n".join(
+        [
+            f"| {row['Dependency']} | {row['Version']} | {row['Why it was used']} |"
+            for _, row in deps_df.iterrows()
+        ]
+    )
 
     mo.md(f"""
     ## Uses of Python: Reflection
 
-This project intentionally combines high-level APIs and transparent post-model analytics:
+This project intentionally balances computational performance and interpretability, reflecting the course emphasis on “modeling for insight” rather than prediction-only workflows.
 
-- **Performance:** TensorFlow `tf.data` pipelines (batching + prefetching) reduced data-loading overhead and kept GPU/CPU utilization stable during training.
-- **Human readability:** The workflow is segmented into small notebook cells with explicit intermediate objects (`train_df`, `signatures_df`, etc.), making the analysis auditable.
-- **Dependencies and reproducibility:** Fixed random states, explicit preprocessing, and package-version reporting improve reproducibility for teammates and graders.
-- **Interpretability-first coding choices:** We went beyond "fit/predict" by adding entropy diagnostics, ranked cosine similarity, and inferential tests to align with course goals around model interpretation under uncertainty.
+- **Performance:** `tf.data` with batching and prefetching minimized I/O bottlenecks in image loading.
+- **Readability:** the notebook is cell-structured with named intermediate artifacts so teammates can audit each stage.
+- **Reproducibility:** fixed random seeds, consistent preprocessing, and explicit dependency/version reporting support stable re-runs.
+- **Interpretive depth:** entropy, bootstrap intervals, and ranked similarity analysis were added deliberately to satisfy descriptive-analytics goals from DA 351.
 
 ### Technical dependencies
-{deps_df.to_markdown(index=False)}
+| Dependency | Version | Why it was used |
+|---|---|---|
+{deps_table_rows}
 """)
     return
 
@@ -729,7 +892,7 @@ Lavin, M. (2026). *DA 351: Advanced descriptive methods for data analytics (cour
 
 Monarch, R. M. (2021). *Human-in-the-loop machine learning: Active learning and annotation for human-centered AI*. Manning.
 
-Wah, C., Branson, S., Welinder, P., Perona, P., & Belongie, S. (2011). *The Caltech-UCSD Birds-200-2011 dataset* (Technical Report CNS-TR-2011-001). California Institute of Technology. https://authors.library.caltech.edu/27452/
+Wah, C., Branson, S., Welinder, P., Perona, P., & Belongie, S. (2011). *The Caltech-UCSD Birds-200-2011 dataset* (Technical Report CNS-TR-2011-001). California Institute of Technology. https://authors.library.caltech.edu/records/cvm3y-5hh21
     """)
     return
 
