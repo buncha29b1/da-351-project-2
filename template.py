@@ -28,9 +28,9 @@ def _():
         StandardScaler,
         TSNE,
         accuracy_score,
-        layers,
         balanced_accuracy_score,
         f1_score,
+        layers,
         mannwhitneyu,
         md,
         mo,
@@ -611,8 +611,8 @@ def _(
 
     novel_examples = novel_results.head(8).copy()
     ranked_neighbors = []
-    for _, row in novel_examples.iterrows():
-        vec = row[prob_cols_results].to_numpy()
+    for _, row1 in novel_examples.iterrows():
+        vec = row1[prob_cols_results].to_numpy()
         sims = [
             (cls, cosine_similarity(vec, centroid_probs.loc[cls].to_numpy()))
             for cls in centroid_probs.index
@@ -620,7 +620,7 @@ def _(
         sims_sorted = sorted(sims, key=lambda x: x[1], reverse=True)[:3]
         ranked_neighbors.append(
             {
-                "Novel image": row["filepath"],
+                "Novel image": row1["filepath"],
                 "Top-1 similar known class": sims_sorted[0][0],
                 "Similarity": f"{sims_sorted[0][1]:.4f}",
                 "Top-3 neighborhood": ", ".join([f"{c} ({s:.3f})" for c, s in sims_sorted]),
@@ -677,12 +677,10 @@ def _(
         columns=["Metric", "Value"],
     )
     calibration_summary["Value"] = calibration_summary["Value"].map(lambda x: f"{x:.6f}")
-
     return (
         calibration_df,
         calibration_summary,
         class_diagnostics,
-        known_eval,
         metrics_table_results,
         novelty_neighbors_table,
         novelty_table_results,
@@ -698,34 +696,32 @@ def _(
     novelty_neighbors_table,
     novelty_table_results,
 ):
-    mo.md(
-        f"""
-### Model performance and validity checks
+    mo.md(f"""
+    ### Model performance and validity checks
 
-To meet the DA 351 standards around uncertainty, interpretability, and methodological depth, results are reported at three levels:  
-1) supervised predictive power on known species,  
-2) inferential evidence that withheld species trigger meaningful uncertainty shifts, and  
-3) similarity-based descriptive outputs for unseen birds.
+    To meet the DA 351 standards around uncertainty, interpretability, and methodological depth, results are reported at three levels:  
+    1) supervised predictive power on known species,  
+    2) inferential evidence that withheld species trigger meaningful uncertainty shifts, and  
+    3) similarity-based descriptive outputs for unseen birds.
 
-**Table 1. Predictive performance on known species**
-{metrics_table_results.to_markdown(index=False)}
+    **Table 1. Predictive performance on known species**
+    {metrics_table_results.to_markdown(index=False)}
 
-**Table 2. Novelty confidence and statistical significance**
-{novelty_table_results.to_markdown(index=False)}
+    **Table 2. Novelty confidence and statistical significance**
+    {novelty_table_results.to_markdown(index=False)}
 
-**Table 3. Calibration diagnostic on known classes**
-{calibration_summary.to_markdown(index=False)}
+    **Table 3. Calibration diagnostic on known classes**
+    {calibration_summary.to_markdown(index=False)}
 
-**Table 4. Ranked cosine-similarity neighborhoods for withheld-species images**
-{novelty_neighbors_table.to_markdown(index=False)}
+    **Table 4. Ranked cosine-similarity neighborhoods for withheld-species images**
+    {novelty_neighbors_table.to_markdown(index=False)}
 
-How these results go beyond a basic CV assignment:
-- **Predictive power with uncertainty framing:** top-1/top-3, macro-F1, and balanced accuracy are reported together so performance is not reduced to a single vanity metric.
-- **Statistical significance with effect direction:** Mann–Whitney U tests evaluate the directional hypothesis that novel inputs produce lower confidence and higher entropy.
-- **Validity emphasis:** bootstrap confidence intervals quantify stability of known-class performance under re-sampling rather than relying on one point estimate.
-- **Interpretability by design:** ranked cosine neighborhoods operationalize the class idea of “descriptive modeling for insight,” translating model uncertainty into biologically meaningful similarity narratives.
-"""
-    )
+    How these results go beyond a basic CV assignment:
+    - **Predictive power with uncertainty framing:** top-1/top-3, macro-F1, and balanced accuracy are reported together so performance is not reduced to a single vanity metric.
+    - **Statistical significance with effect direction:** Mann–Whitney U tests evaluate the directional hypothesis that novel inputs produce lower confidence and higher entropy.
+    - **Validity emphasis:** bootstrap confidence intervals quantify stability of known-class performance under re-sampling rather than relying on one point estimate.
+    - **Interpretability by design:** ranked cosine neighborhoods operationalize the class idea of “descriptive modeling for insight,” translating model uncertainty into biologically meaningful similarity narratives.
+    """)
     return
 
 
@@ -823,22 +819,22 @@ def _(mo):
     mo.md(r"""
     ## Interpretation
 
-The results directly answer the research question: yes, a probability-signature workflow can meaningfully describe unseen birds without pretending certainty. In plain terms, when the model sees the withheld species, it “acts unsure” in the expected way (lower max probability, higher entropy), and it does so consistently enough for non-parametric significance tests to detect a real shift rather than random fluctuation.
+    The results directly answer the research question: yes, a probability-signature workflow can meaningfully describe unseen birds without pretending certainty. In plain terms, when the model sees the withheld species, it “acts unsure” in the expected way (lower max probability, higher entropy), and it does so consistently enough for non-parametric significance tests to detect a real shift rather than random fluctuation.
 
-The strongest contribution is not the top-1 score; it is the ranked neighborhood output. For unseen images, we can say “this bird is closest to these three known classes, in this order, with these similarity values.” That is the kind of interpretation we practiced all semester: turning model behavior into evidence that can support inquiry, not just prediction.
+    The strongest contribution is not the top-1 score; it is the ranked neighborhood output. For unseen images, we can say “this bird is closest to these three known classes, in this order, with these similarity values.” That is the kind of interpretation we practiced all semester: turning model behavior into evidence that can support inquiry, not just prediction.
 
-The interpretation is anchored in four non-basic diagnostic plots:
-- **Reliability curve:** confidence vs. empirical accuracy shows how calibrated (or overconfident) the known-class predictions are, with bin counts to prevent over-reading sparse bins.
-- **Top-1 vs top-2 margin distribution:** novel images compress toward smaller margins, showing ambiguity in rank structure even before the model fully “admits” uncertainty.
-- **Confidence–entropy geometry:** novel points concentrate in the low-confidence/high-entropy region, giving a geometric view of uncertainty rather than a single threshold.
-- **Class-level support vs F1 (entropy-colored bubbles):** this reveals where the model struggles despite comparable sample sizes, which is stronger evidence of fine-grained confusion than aggregate accuracy alone.
+    The interpretation is anchored in four non-basic diagnostic plots:
+    - **Reliability curve:** confidence vs. empirical accuracy shows how calibrated (or overconfident) the known-class predictions are, with bin counts to prevent over-reading sparse bins.
+    - **Top-1 vs top-2 margin distribution:** novel images compress toward smaller margins, showing ambiguity in rank structure even before the model fully “admits” uncertainty.
+    - **Confidence–entropy geometry:** novel points concentrate in the low-confidence/high-entropy region, giving a geometric view of uncertainty rather than a single threshold.
+    - **Class-level support vs F1 (entropy-colored bubbles):** this reveals where the model struggles despite comparable sample sizes, which is stronger evidence of fine-grained confusion than aggregate accuracy alone.
 
-Major caveats:
-- **Single withheld-species setup:** this is strong evidence for one novelty scenario, not yet a universal claim across all species families.
-- **Potential background leakage:** transfer learning can still absorb contextual cues (branch type, sky texture, feeder style) that are correlated with class.
-- **Embedding-plot caution:** t-SNE is useful for local structure but does not preserve full global geometry, so it should be treated as interpretive support, not proof.
+    Major caveats:
+    - **Single withheld-species setup:** this is strong evidence for one novelty scenario, not yet a universal claim across all species families.
+    - **Potential background leakage:** transfer learning can still absorb contextual cues (branch type, sky texture, feeder style) that are correlated with class.
+    - **Embedding-plot caution:** t-SNE is useful for local structure but does not preserve full global geometry, so it should be treated as interpretive support, not proof.
 
-Generalization is plausible to other fine-grained settings (plant disease phenotypes, insect species ID, defect taxonomy in manufacturing) where “unknown unknowns” are expected. A concrete extension would be a true heterogeneous ensemble (e.g., MobileNet + EfficientNet + ViT), calibration diagnostics, and a human-in-the-loop review stage for low-margin cases.
+    Generalization is plausible to other fine-grained settings (plant disease phenotypes, insect species ID, defect taxonomy in manufacturing) where “unknown unknowns” are expected. A concrete extension would be a true heterogeneous ensemble (e.g., MobileNet + EfficientNet + ViT), calibration diagnostics, and a human-in-the-loop review stage for low-margin cases.
     """)
     return
 
@@ -866,18 +862,18 @@ def _(md, mo, pd):
     mo.md(f"""
     ## Uses of Python: Reflection
 
-This project intentionally balances computational performance and interpretability, reflecting the course emphasis on “modeling for insight” rather than prediction-only workflows.
+    This project intentionally balances computational performance and interpretability, reflecting the course emphasis on “modeling for insight” rather than prediction-only workflows.
 
-- **Performance:** `tf.data` with batching and prefetching minimized I/O bottlenecks in image loading.
-- **Readability:** the notebook is cell-structured with named intermediate artifacts so teammates can audit each stage.
-- **Reproducibility:** fixed random seeds, consistent preprocessing, and explicit dependency/version reporting support stable re-runs.
-- **Interpretive depth:** entropy, bootstrap intervals, and ranked similarity analysis were added deliberately to satisfy descriptive-analytics goals from DA 351.
+    - **Performance:** `tf.data` with batching and prefetching minimized I/O bottlenecks in image loading.
+    - **Readability:** the notebook is cell-structured with named intermediate artifacts so teammates can audit each stage.
+    - **Reproducibility:** fixed random seeds, consistent preprocessing, and explicit dependency/version reporting support stable re-runs.
+    - **Interpretive depth:** entropy, bootstrap intervals, and ranked similarity analysis were added deliberately to satisfy descriptive-analytics goals from DA 351.
 
-### Technical dependencies
-| Dependency | Version | Why it was used |
-|---|---|---|
-{deps_table_rows}
-""")
+    ### Technical dependencies
+    | Dependency | Version | Why it was used |
+    |---|---|---|
+    {deps_table_rows}
+    """)
     return
 
 
@@ -886,13 +882,13 @@ def _(mo):
     mo.md(r"""
     ## References
 
-Brewer, E., Ramchandran, A., de Silva, V., & Naik, N. (2020). Predicting road quality using high resolution satellite imagery. *Proceedings of the AAAI Conference on Artificial Intelligence, 34*(1), 1195–1202. https://doi.org/10.1609/aaai.v34i01.5494
+    Brewer, E., Ramchandran, A., de Silva, V., & Naik, N. (2020). Predicting road quality using high resolution satellite imagery. *Proceedings of the AAAI Conference on Artificial Intelligence, 34*(1), 1195–1202. https://doi.org/10.1609/aaai.v34i01.5494
 
-Lavin, M. (2026). *DA 351: Advanced descriptive methods for data analytics (course materials and lecture notes)*. Denison University.
+    Lavin, M. (2026). *DA 351: Advanced descriptive methods for data analytics (course materials and lecture notes)*. Denison University.
 
-Monarch, R. M. (2021). *Human-in-the-loop machine learning: Active learning and annotation for human-centered AI*. Manning.
+    Monarch, R. M. (2021). *Human-in-the-loop machine learning: Active learning and annotation for human-centered AI*. Manning.
 
-Wah, C., Branson, S., Welinder, P., Perona, P., & Belongie, S. (2011). *The Caltech-UCSD Birds-200-2011 dataset* (Technical Report CNS-TR-2011-001). California Institute of Technology. https://authors.library.caltech.edu/records/cvm3y-5hh21
+    Wah, C., Branson, S., Welinder, P., Perona, P., & Belongie, S. (2011). *The Caltech-UCSD Birds-200-2011 dataset* (Technical Report CNS-TR-2011-001). California Institute of Technology. https://authors.library.caltech.edu/records/cvm3y-5hh21
     """)
     return
 
