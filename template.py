@@ -852,7 +852,7 @@ def _(
     axes[1].set_ylabel("Image count")
     axes[1].legend()
 
-    roc_auc_entropy_plot = np.trapz(roc_tpr_entropy, roc_fpr_entropy)
+    roc_auc_entropy_plot = np.trapezoid(roc_tpr_entropy, roc_fpr_entropy)
     axes[2].plot(roc_fpr_entropy, roc_tpr_entropy, color="#7c3aed", linewidth=2)
     axes[2].plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
     axes[2].set_title(f"ROC Curve for Novelty Detection\nAUC = {roc_auc_entropy_plot:.4f}")
