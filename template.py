@@ -22,6 +22,7 @@ def _():
         confusion_matrix,
         f1_score,
         roc_auc_score,
+        roc_curve,
     )
     from tensorflow.keras import layers, models
     from tensorflow.keras.applications import MobileNetV2
@@ -49,6 +50,7 @@ def _():
         plt,
         preprocess_input,
         roc_auc_score,
+        roc_curve,
         tf,
         train_test_split,
     )
@@ -519,6 +521,7 @@ def _(
     np,
     pd,
     roc_auc_score,
+    roc_curve,
     signatures_df_step2,
 ):
     prob_cols_results = [c for c in signatures_df_step2.columns if c.startswith("prob_")]
@@ -584,6 +587,10 @@ def _(
     auc_novelty_margin = roc_auc_score(
         signatures_df_results["is_novel"].astype(int).to_numpy(),
         (-signatures_df_results["margin_top1_top2"]).to_numpy(),
+    )
+    roc_fpr_entropy, roc_tpr_entropy, _ = roc_curve(
+        signatures_df_results["is_novel"].astype(int).to_numpy(),
+        signatures_df_results["entropy"].to_numpy(),
     )
 
     boot_rng = np.random.default_rng(351)
@@ -743,6 +750,8 @@ def _(
         metrics_table_html,
         neighbors_table_html,
         novelty_table_html,
+        roc_fpr_entropy,
+        roc_tpr_entropy,
         signatures_df_results,
     )
 
@@ -797,9 +806,11 @@ def _(
     known_eval,
     np,
     plt,
+    roc_fpr_entropy,
+    roc_tpr_entropy,
     signatures_df_results,
 ):
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(19, 5))
 
     axes[0].plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
     axes[0].plot(
@@ -840,6 +851,16 @@ def _(
     axes[1].set_xlabel("Margin size")
     axes[1].set_ylabel("Image count")
     axes[1].legend()
+
+    roc_auc_entropy_plot = np.trapezoid(roc_tpr_entropy, roc_fpr_entropy)
+    axes[2].plot(roc_fpr_entropy, roc_tpr_entropy, color="#7c3aed", linewidth=2)
+    axes[2].plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
+    axes[2].set_title(f"ROC Curve for Novelty Detection\nAUC = {roc_auc_entropy_plot:.4f}")
+    axes[2].set_xlabel("False Positive Rate")
+    axes[2].set_ylabel("True Positive Rate")
+    axes[2].set_xlim(0, 1)
+    axes[2].set_ylim(0, 1)
+
     plt.tight_layout()
     plt.show()
 
