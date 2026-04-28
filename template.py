@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
+    import jinja2
     import os
     import importlib.metadata as md
     import pandas as pd
@@ -733,17 +734,15 @@ def _(
     )
     return (
         calibration_df,
+        calibration_table_html,
         class_diagnostics,
         cm_labels,
         confusion_mat,
         confusions_table_html,
         known_eval,
         metrics_table_html,
-        metrics_table_results,
         neighbors_table_html,
         novelty_table_html,
-        top_confusions,
-        calibration_table_html,
         signatures_df_results,
     )
 
@@ -796,6 +795,7 @@ def _(
     cm_labels,
     confusion_mat,
     known_eval,
+    np,
     plt,
     signatures_df_results,
 ):
